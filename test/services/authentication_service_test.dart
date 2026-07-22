@@ -16,6 +16,7 @@ Future<bool> mockLaunchUrl(
   Uri url, {
   LaunchMode mode = LaunchMode.platformDefault,
   WebViewConfiguration webViewConfiguration = const WebViewConfiguration(),
+  String? webOnlyWindowName,
 }) async => true;
 
 void main() {
@@ -202,7 +203,7 @@ void main() {
         ).thenAnswer(
           (_) async => HttpResponse(
             statusCode: 200,
-            body: '{"authenticationUrl": "https://test.authress.io/auth"}',
+            body: '{"authenticationUrl": "https://test.authress.io/auth", "authenticationRequestId": "mock-nonce-456"}',
             headers: const {},
             isSuccess: true,
           ),
@@ -254,7 +255,7 @@ void main() {
         ).thenAnswer(
           (_) async => HttpResponse(
             statusCode: 200,
-            body: '{"authenticationUrl": "https://test.authress.io/auth"}',
+            body: '{"authenticationUrl": "https://test.authress.io/auth", "authenticationRequestId": "mock-nonce-456"}',
             headers: const {},
             isSuccess: true,
           ),
@@ -306,7 +307,7 @@ void main() {
         ).thenAnswer(
           (_) async => HttpResponse(
             statusCode: 200,
-            body: '{"authenticationUrl": "https://test.authress.io/auth"}',
+            body: '{"authenticationUrl": "https://test.authress.io/auth", "authenticationRequestId": "mock-nonce-456"}',
             headers: const {},
             isSuccess: true,
           ),
@@ -334,7 +335,7 @@ void main() {
         ).thenAnswer(
           (_) async => HttpResponse(
             statusCode: 200,
-            body: '{"authenticationUrl": "https://test.authress.io/auth"}',
+            body: '{"authenticationUrl": "https://test.authress.io/auth", "authenticationRequestId": "mock-nonce-456"}',
             headers: const {},
             isSuccess: true,
           ),
@@ -362,7 +363,7 @@ void main() {
         ).thenAnswer(
           (_) async => HttpResponse(
             statusCode: 200,
-            body: '{"authenticationUrl": "https://test.authress.io/auth"}',
+            body: '{"authenticationUrl": "https://test.authress.io/auth", "authenticationRequestId": "mock-nonce-456"}',
             headers: const {},
             isSuccess: true,
           ),
@@ -404,7 +405,7 @@ void main() {
         ).thenAnswer(
           (_) async => HttpResponse(
             statusCode: 200,
-            body: '{"authenticationUrl": "https://test.authress.io/auth"}',
+            body: '{"authenticationUrl": "https://test.authress.io/auth", "authenticationRequestId": "mock-nonce-456"}',
             headers: const {},
             isSuccess: true,
           ),
@@ -731,7 +732,7 @@ void main() {
         ).thenAnswer(
           (_) async => HttpResponse(
             statusCode: 200,
-            body: '{"authenticationUrl": "https://test.authress.io/auth"}',
+            body: '{"authenticationUrl": "https://test.authress.io/auth", "authenticationRequestId": "mock-nonce-456"}',
             headers: const {},
             isSuccess: true,
           ),
@@ -777,6 +778,81 @@ void main() {
           equals(0),
         ); // No change from initial unauthenticated state
         expect(authService.state, isA<AuthStateUnauthenticated>());
+      });
+    });
+    group('Web OIDC callback', () {
+      test('completes login from URL query params on initialize', () async {
+        authService = AuthenticationService.forTesting(
+          config: TestData.validConfig,
+          tokenService: mockTokenService,
+          httpService: mockHttpService,
+          deepLinkService: mockDeepLinkService,
+          cryptoService: mockCryptoService,
+          enableUriCallbackOnInit: true,
+          currentUriFn: () => Uri.parse(
+            'https://app.example.com/auth/callback?code=mock-auth-code-123&nonce=mock-nonce-456',
+          ),
+        );
+
+        when(() => mockTokenService.loadStoredTokens()).thenAnswer((_) async => null);
+
+        when(() => mockTokenService.loadPendingAuth()).thenAnswer(
+          (_) async => {
+            'nonce': 'mock-nonce-456',
+            'codeVerifier': TestData.mockPKCECodes.codeVerifier,
+            'redirectUrl': 'https://app.example.com/auth/callback',
+          },
+        );
+
+        when(
+          () => mockHttpService.post(
+            '/api/authentication/mock-nonce-456/tokens',
+            body: any(named: 'body'),
+          ),
+        ).thenAnswer(
+          (_) async => HttpResponse(
+            statusCode: 200,
+            body: json.encode(TestData.tokenResponse),
+            headers: const {},
+            isSuccess: true,
+          ),
+        );
+
+        await authService.initialize();
+
+        expect(authService.state, isA<AuthStateAuthenticated>());
+        expect(authService.accessToken, equals(TestData.validAccessToken));
+        verifyNever(() => mockDeepLinkService.initialize());
+        verify(() => mockTokenService.clearPendingAuth()).called(1);
+      });
+
+      test('clears pending auth when callback nonce mismatches', () async {
+        authService = AuthenticationService.forTesting(
+          config: TestData.validConfig,
+          tokenService: mockTokenService,
+          httpService: mockHttpService,
+          deepLinkService: mockDeepLinkService,
+          cryptoService: mockCryptoService,
+          enableUriCallbackOnInit: true,
+          currentUriFn: () => Uri.parse(
+            'https://app.example.com/auth/callback?code=mock-auth-code-123&nonce=wrong-nonce',
+          ),
+        );
+
+        when(() => mockTokenService.loadStoredTokens()).thenAnswer((_) async => null);
+
+        when(() => mockTokenService.loadPendingAuth()).thenAnswer(
+          (_) async => {
+            'nonce': 'mock-nonce-456',
+            'codeVerifier': TestData.mockPKCECodes.codeVerifier,
+            'redirectUrl': 'https://app.example.com/auth/callback',
+          },
+        );
+
+        await authService.initialize();
+
+        expect(authService.state, isA<AuthStateError>());
+        verify(() => mockTokenService.clearPendingAuth()).called(1);
       });
     });
   });

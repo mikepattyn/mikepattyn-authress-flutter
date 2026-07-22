@@ -70,6 +70,7 @@ class TestData {
   // Mock HTTP responses
   static const authUrlResponse = {
     'authenticationUrl': 'https://test.authress.io/auth?client_id=test-app-123&redirect_uri=flyingdarts://auth',
+    'authenticationRequestId': 'mock-nonce-456',
   };
 
   static const tokenResponse = {
@@ -136,10 +137,11 @@ class TestWidgetHelper {
 void setupMockTokenService(MockTokenService mockTokenService) {
   // Track stored tokens for PKCE verifier flow
   AuthStateAuthenticated? _storedState;
+  Map<String, dynamic>? _pendingAuth;
 
   when(
     () => mockTokenService.loadStoredTokens(),
-  ).thenAnswer((_) async => _storedState ?? TestData.validAuthenticatedState);
+  ).thenAnswer((_) async => _storedState);
 
   when(
     () => mockTokenService.storeTokens(
@@ -163,8 +165,29 @@ void setupMockTokenService(MockTokenService mockTokenService) {
     );
   });
 
+  when(
+    () => mockTokenService.storePendingAuth(
+      nonce: any(named: 'nonce'),
+      codeVerifier: any(named: 'codeVerifier'),
+      redirectUrl: any(named: 'redirectUrl'),
+    ),
+  ).thenAnswer((invocation) async {
+    _pendingAuth = {
+      'nonce': invocation.namedArguments[#nonce] as String,
+      'codeVerifier': invocation.namedArguments[#codeVerifier] as String,
+      'redirectUrl': invocation.namedArguments[#redirectUrl] as String,
+    };
+  });
+
+  when(() => mockTokenService.loadPendingAuth()).thenAnswer((_) async => _pendingAuth);
+
+  when(() => mockTokenService.clearPendingAuth()).thenAnswer((_) async {
+    _pendingAuth = null;
+  });
+
   when(() => mockTokenService.clearTokens()).thenAnswer((_) async {
     _storedState = null;
+    _pendingAuth = null;
   });
 
   when(() => mockTokenService.hasValidTokens()).thenAnswer((_) async => true);

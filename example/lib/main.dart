@@ -1,5 +1,5 @@
-import 'package:mikepattyn_authress_login/mikepattyn_authress_login.dart';
 import 'package:flutter/material.dart';
+import 'package:mikepattyn_authress_login/mikepattyn_authress_login.dart';
 
 import 'core/router/app_router.dart';
 
@@ -26,6 +26,8 @@ class _MyAppState extends State<MyApp> {
       config: const AuthressConfiguration(
         applicationId: 'app_2YKyhM6M31XVtuCeuDsSJ2',
         authressApiUrl: 'https://authress.flyingdarts.net',
+        // Mobile deep link. On web, custom schemes map to `{origin}/auth/callback`.
+        redirectUrl: 'flyingdarts://auth',
       ),
       deepLinkConfig: const DeepLinkConfig(
         scheme: 'flyingdarts',

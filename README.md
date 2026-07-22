@@ -12,7 +12,7 @@ The package is built using modern Flutter patterns with dependency injection, se
 - **Go Router Integration**: Built-in route guards for protected routes
 - **Smart Browser Management**: Platform-optimized browser handling for authentication flows
 - **Automatic Token Management**: Handles token storage, refresh, and expiration
-- **Secure Token Storage**: Uses Flutter's secure storage mechanisms
+- **Secure Token Storage**: Uses `shared_preferences` for token storage
 - **Real-time Auth State**: Listen to authentication state changes
 - **Cross-Platform Support**: Works on iOS, Android, and Web
 - **Role & Group Based Access**: Support for role and group-based authorization
@@ -528,19 +528,43 @@ flutter test
 - Add unit tests for all public methods
 - Use sealed classes for type safety
 
+## Web platform
+
+On Flutter web, `AuthressProvider` runs a full-page OIDC redirect (same-tab via `url_launcher`):
+
+1. `authenticate()` POSTs to Authress with PKCE and navigates to Hosted Login.
+2. Authress redirects back to your app with `code` and `nonce` query params.
+3. On the next app load, `AuthressProvider` completes the token exchange from `Uri.base` and clears OAuth query params from the address bar.
+
+**Redirect URL setup**
+
+- If `redirectUrl` is a custom scheme (e.g. `myapp://auth`), web automatically uses `{your-origin}/auth/callback`.
+- Register that HTTPS callback URL in your Authress application settings.
+- Add a matching Go Router route (see `example/lib/core/router/app_router.dart`).
+
+**Run the web example**
+
+```bash
+cd example
+flutter run -d chrome
+```
+
+Mobile continues to use deep links via `app_links` and `DeepLinkConfig`.
+
 ## Dependencies
 
 ### Runtime Dependencies
 
 - **flutter**: Flutter SDK
-- **go_router**: ^16.0.0 - Routing integration
-- **webview_flutter**: ^4.4.2 - In-app browser authentication
-- **url_launcher**: ^6.2.1 - External URL launching
-- **shared_preferences**: ^2.2.2 - Token storage
-- **jwt_decode**: ^0.3.1 - JWT token parsing
-- **app_links**: ^6.3.2 - Deep link handling
-- **http**: ^1.1.0 - HTTP requests
-- **crypto**: ^3.0.3 - Cryptographic operations
+- **go_router**: ^17.0.0 - Routing integration
+- **webview_flutter**: ^4.9.0 - Listed for future in-app browser use
+- **url_launcher**: ^6.3.1 - External URL launching
+- **shared_preferences**: ^2.5.4 - Token storage
+- **jwt_decode**: ^0.3.1 - Listed; JWT parsing is done manually
+- **app_links**: ^7.0.0 - Deep link handling (mobile)
+- **web**: ^1.1.1 - OAuth query cleanup on web
+- **http**: ^1.2.2 - HTTP requests
+- **crypto**: ^3.0.5 - Cryptographic operations
 
 ### Development Dependencies
 
@@ -574,6 +598,11 @@ flutter test
    - The package uses `shared_preferences` for token storage
    - Make sure you're not clearing app data during testing
    - Verify that token refresh is working correctly
+
+5. **Web login redirect fails or callback not completing**
+   - Register `{origin}/auth/callback` in Authress when using a custom-scheme `redirectUrl`
+   - Ensure your router exposes `/auth/callback` (any page is fine; exchange runs on init)
+   - Use HTTPS in production; localhost is supported for development
 
 ## Contributing
 

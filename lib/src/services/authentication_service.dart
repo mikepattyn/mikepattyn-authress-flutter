@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:mikepattyn_authress_login/src/models/deep_link_config.dart';
@@ -8,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/auth_config.dart';
 import '../models/auth_state.dart';
 import '../models/user_profile.dart';
+import '../platform/url_cleaner.dart';
 import 'crypto_service.dart';
 import 'deep_link_service.dart';
 import 'http_service.dart';
@@ -22,7 +22,26 @@ typedef LaunchUrlFn =
       Uri url, {
       LaunchMode mode,
       WebViewConfiguration webViewConfiguration,
+      String? webOnlyWindowName,
     });
+
+/// Returns the current page URI (injectable for tests).
+typedef CurrentUriFn = Uri Function();
+
+/// Result of starting an Authress authentication request.
+class AuthenticationStartResult {
+  final String authenticationUrl;
+  final String authenticationRequestId;
+  final String redirectUrl;
+  final String codeVerifier;
+
+  const AuthenticationStartResult({
+    required this.authenticationUrl,
+    required this.authenticationRequestId,
+    required this.redirectUrl,
+    required this.codeVerifier,
+  });
+}
 
 /// Main authentication service that orchestrates all auth-related operations
 class AuthenticationService extends ChangeNotifier {
@@ -33,6 +52,8 @@ class AuthenticationService extends ChangeNotifier {
   final CryptoService _cryptoService;
   final CanLaunchUrlFn _canLaunchUrl;
   final LaunchUrlFn _launchUrl;
+  final CurrentUriFn _currentUri;
+  final bool _enableUriCallbackOnInit;
 
   AuthState _state = const AuthStateUnauthenticated();
 
@@ -44,13 +65,17 @@ class AuthenticationService extends ChangeNotifier {
     required CryptoService cryptoService,
     CanLaunchUrlFn? canLaunchUrlFn,
     LaunchUrlFn? launchUrlFn,
+    CurrentUriFn? currentUriFn,
+    bool enableUriCallbackOnInit = false,
   }) : _config = config,
        _tokenService = tokenService,
        _httpService = httpService,
        _deepLinkService = deepLinkService,
        _cryptoService = cryptoService,
        _canLaunchUrl = canLaunchUrlFn ?? canLaunchUrl,
-       _launchUrl = launchUrlFn ?? launchUrl;
+       _launchUrl = launchUrlFn ?? launchUrl,
+       _currentUri = currentUriFn ?? (() => Uri.base),
+       _enableUriCallbackOnInit = enableUriCallbackOnInit;
 
   /// Factory constructor with dependency injection
   factory AuthenticationService.create({
@@ -83,6 +108,8 @@ class AuthenticationService extends ChangeNotifier {
     required CryptoService cryptoService,
     CanLaunchUrlFn? canLaunchUrlFn,
     LaunchUrlFn? launchUrlFn,
+    CurrentUriFn? currentUriFn,
+    bool enableUriCallbackOnInit = false,
   }) {
     return AuthenticationService._(
       config: config,
@@ -92,6 +119,8 @@ class AuthenticationService extends ChangeNotifier {
       cryptoService: cryptoService,
       canLaunchUrlFn: canLaunchUrlFn,
       launchUrlFn: launchUrlFn,
+      currentUriFn: currentUriFn,
+      enableUriCallbackOnInit: enableUriCallbackOnInit,
     );
   }
 
@@ -109,8 +138,15 @@ class AuthenticationService extends ChangeNotifier {
 
   /// Initialize the service and check for existing sessions
   Future<void> initialize() async {
-    await _deepLinkService.initialize();
-    await _checkExistingSession();
+    if (kIsWeb || _enableUriCallbackOnInit) {
+      await _completeLoginFromCallbackIfPresent();
+    } else {
+      await _deepLinkService.initialize();
+    }
+
+    if (_state is AuthStateUnauthenticated) {
+      await _checkExistingSession();
+    }
   }
 
   /// Check if a user session exists and is valid
@@ -147,52 +183,87 @@ class AuthenticationService extends ChangeNotifier {
     _setState(const AuthStateLoading());
 
     try {
-      // Generate authentication URL
-      final authUrl = await _generateAuthenticationUrl(
+      final authStart = await _startAuthenticationRequest(
         connectionId: connectionId,
         tenantLookupIdentifier: tenantLookupIdentifier,
         additionalParams: additionalParams,
       );
 
-      // Launch browser for authentication with platform-specific handling
-      if (await _canLaunchUrl(Uri.parse(authUrl))) {
-        if (Platform.isIOS) {
-          // Use in-app WebView on iOS to prevent "Return to Safari" button issue
-          await _launchUrl(
-            Uri.parse(authUrl),
-            mode: LaunchMode.inAppWebView,
-            webViewConfiguration: const WebViewConfiguration(
-              enableJavaScript: true,
-              enableDomStorage: true,
-            ),
-          );
-        } else {
-          // Use external browser on other platforms
-          await _launchUrl(
-            Uri.parse(authUrl),
-            mode: LaunchMode.externalApplication,
-          );
-        }
+      await _tokenService.storePendingAuth(
+        nonce: authStart.authenticationRequestId,
+        codeVerifier: authStart.codeVerifier,
+        redirectUrl: authStart.redirectUrl,
+      );
 
-        // Wait for deep link callback
-        final authParams = await _deepLinkService.waitForAuthCallback();
-
-        if (authParams == null) {
-          _setState(
-            const AuthStateError(
-              message: 'Authentication was cancelled or timed out',
-            ),
-          );
-          return;
-        }
-
-        // Process authentication result
-        await _processAuthenticationCallback(authParams);
-      } else {
+      if (!(await _canLaunchUrl(Uri.parse(authStart.authenticationUrl)))) {
+        await _tokenService.clearPendingAuth();
         _setState(
           const AuthStateError(message: 'Cannot launch authentication URL'),
         );
+        return;
       }
+
+      if (kIsWeb) {
+        await _launchUrl(
+          Uri.parse(authStart.authenticationUrl),
+          mode: LaunchMode.externalApplication,
+          webOnlyWindowName: '_self',
+        );
+        // Page unloads for Hosted Login; callback completes on next initialize().
+        return;
+      }
+
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        await _launchUrl(
+          Uri.parse(authStart.authenticationUrl),
+          mode: LaunchMode.inAppWebView,
+          webViewConfiguration: const WebViewConfiguration(
+            enableJavaScript: true,
+            enableDomStorage: true,
+          ),
+        );
+      } else {
+        await _launchUrl(
+          Uri.parse(authStart.authenticationUrl),
+          mode: LaunchMode.externalApplication,
+        );
+      }
+
+      final authParams = await _deepLinkService.waitForAuthCallback();
+
+      if (authParams == null) {
+        await _tokenService.clearPendingAuth();
+        _setState(
+          const AuthStateError(
+            message: 'Authentication was cancelled or timed out',
+          ),
+        );
+        return;
+      }
+
+      await _processAuthenticationCallback(authParams);
+    } catch (e) {
+      await _tokenService.clearPendingAuth();
+      _setState(
+        AuthStateError(
+          message: 'Authentication failed: ${e.toString()}',
+          error: e,
+        ),
+      );
+    }
+  }
+
+  /// Complete OIDC login when the app reloads with code + nonce in the URL (web).
+  Future<void> _completeLoginFromCallbackIfPresent() async {
+    final params = _currentUri().queryParameters;
+    final code = params['code'];
+    final nonce = params['nonce'];
+    if (code == null || nonce == null) {
+      return;
+    }
+
+    try {
+      await _processAuthenticationCallback(params);
     } catch (e) {
       _setState(
         AuthStateError(
@@ -200,6 +271,9 @@ class AuthenticationService extends ChangeNotifier {
           error: e,
         ),
       );
+    } finally {
+      await _tokenService.clearPendingAuth();
+      clearAuthressCallbackQuery();
     }
   }
 
@@ -219,33 +293,41 @@ class AuthenticationService extends ChangeNotifier {
       throw Exception('Missing authorization code or nonce in callback');
     }
 
-    // Exchange code for tokens
     await _exchangeCodeForTokens(code, nonce);
   }
 
-  /// Generate authentication URL
-  Future<String> _generateAuthenticationUrl({
+  /// Resolve redirect URL for the current platform.
+  String _resolveRedirectUrl() {
+    final configured = _config.redirectUrl ?? _deepLinkService.callbackUrl;
+    if (kIsWeb && _isCustomSchemeRedirect(configured)) {
+      return '${Uri.base.origin}/auth/callback';
+    }
+    return configured;
+  }
+
+  bool _isCustomSchemeRedirect(String url) {
+    final uri = Uri.tryParse(url);
+    return uri != null && uri.scheme != 'http' && uri.scheme != 'https';
+  }
+
+  /// Start Authress authentication and return redirect metadata.
+  Future<AuthenticationStartResult> _startAuthenticationRequest({
     String? connectionId,
     String? tenantLookupIdentifier,
     Map<String, String>? additionalParams,
   }) async {
-    // Generate PKCE codes
+    final redirectUrl = _resolveRedirectUrl();
     final pkceCodes = _cryptoService.generatePKCECodes();
 
-    // Store code verifier for later use
-    await _storePKCEVerifier(pkceCodes.codeVerifier);
-
-    // Calculate anti-abuse hash
     final antiAbuseHash = await _cryptoService.calculateAntiAbuseHash({
       'connectionId': connectionId,
       'tenantLookupIdentifier': tenantLookupIdentifier,
       'applicationId': _config.applicationId,
     });
 
-    // Build request body
     final requestBody = {
       'antiAbuseHash': antiAbuseHash,
-      'redirectUrl': _config.redirectUrl ?? _deepLinkService.callbackUrl,
+      'redirectUrl': redirectUrl,
       'codeChallengeMethod': pkceCodes.codeChallengeMethod,
       'codeChallenge': pkceCodes.codeChallenge,
       'applicationId': _config.applicationId,
@@ -254,34 +336,54 @@ class AuthenticationService extends ChangeNotifier {
       if (additionalParams != null) ...additionalParams,
     };
 
-    try {
-      final response = await _httpService.post(
-        '/api/authentication',
-        body: requestBody,
+    final response = await _httpService.post(
+      '/api/authentication',
+      body: requestBody,
+    );
+
+    if (!response.isSuccess) {
+      throw Exception(
+        'Failed to get authentication URL: ${response.statusCode} ${response.body}',
       );
-
-      if (!response.isSuccess) {
-        throw Exception(
-          'Failed to get authentication URL: ${response.statusCode} ${response.body}',
-        );
-      }
-
-      return response.jsonBody['authenticationUrl'] as String;
-    } catch (e) {
-      throw Exception('Failed to get authentication URL: $e');
     }
+
+    final authenticationUrl =
+        response.jsonBody['authenticationUrl'] as String?;
+    final authenticationRequestId =
+        response.jsonBody['authenticationRequestId'] as String?;
+
+    if (authenticationUrl == null || authenticationRequestId == null) {
+      throw Exception(
+        'Authress response missing authenticationUrl or authenticationRequestId',
+      );
+    }
+
+    return AuthenticationStartResult(
+      authenticationUrl: authenticationUrl,
+      authenticationRequestId: authenticationRequestId,
+      redirectUrl: redirectUrl,
+      codeVerifier: pkceCodes.codeVerifier,
+    );
   }
 
   /// Exchange authorization code for tokens
   Future<void> _exchangeCodeForTokens(String code, String nonce) async {
-    final codeVerifier = await _retrievePKCEVerifier();
+    final pending = await _tokenService.loadPendingAuth();
+    final codeVerifier = pending?['codeVerifier'] as String?;
+    final redirectUrl =
+        pending?['redirectUrl'] as String? ?? _resolveRedirectUrl();
+    final storedNonce = pending?['nonce'] as String?;
+
     if (codeVerifier == null) {
       throw Exception(
         'Code verifier not found - authentication flow corrupted',
       );
     }
 
-    // Calculate anti-abuse hash for token exchange
+    if (storedNonce != null && storedNonce != nonce) {
+      throw Exception('Authentication nonce mismatch');
+    }
+
     final antiAbuseHash = await _cryptoService.calculateAntiAbuseHash({
       'client_id': _config.applicationId,
       'authenticationRequestId': nonce,
@@ -290,30 +392,25 @@ class AuthenticationService extends ChangeNotifier {
 
     final requestBody = {
       'grant_type': 'authorization_code',
-      'redirect_uri': _config.redirectUrl ?? _deepLinkService.callbackUrl,
+      'redirect_uri': redirectUrl,
       'client_id': _config.applicationId,
       'code': code,
       'code_verifier': codeVerifier,
       'antiAbuseHash': antiAbuseHash,
     };
 
-    try {
-      final response = await _httpService.post(
-        '/api/authentication/$nonce/tokens',
-        body: requestBody,
+    final response = await _httpService.post(
+      '/api/authentication/$nonce/tokens',
+      body: requestBody,
+    );
+
+    if (!response.isSuccess) {
+      throw Exception(
+        'Token exchange failed: ${response.statusCode} ${response.body}',
       );
-
-      if (!response.isSuccess) {
-        throw Exception(
-          'Token exchange failed: ${response.statusCode} ${response.body}',
-        );
-      }
-
-      final data = response.jsonBody;
-      await _processTokenResponse(data);
-    } catch (e) {
-      throw Exception('Token exchange failed: $e');
     }
+
+    await _processTokenResponse(response.jsonBody);
   }
 
   /// Process token response and update state
@@ -323,7 +420,6 @@ class AuthenticationService extends ChangeNotifier {
     final refreshToken = data['refresh_token'] as String?;
     final expiresIn = data['expires_in'] as int? ?? 3600;
 
-    // Parse user profile from ID token
     final payload = _tokenService.parseJwtPayload(idToken);
     if (payload == null) {
       throw Exception('Invalid ID token received');
@@ -332,7 +428,6 @@ class AuthenticationService extends ChangeNotifier {
     final userProfile = UserProfile.fromJson(payload);
     final expiresAt = DateTime.now().add(Duration(seconds: expiresIn));
 
-    // Store tokens
     await _tokenService.storeTokens(
       accessToken: accessToken,
       refreshToken: refreshToken,
@@ -340,7 +435,6 @@ class AuthenticationService extends ChangeNotifier {
       expiresAt: expiresAt,
     );
 
-    // Update state
     final authState = AuthStateAuthenticated(
       user: userProfile,
       accessToken: accessToken,
@@ -383,7 +477,10 @@ class AuthenticationService extends ChangeNotifier {
 
   /// Logout current user
   Future<void> logout() async {
-    _deepLinkService.cancelAuthFlow();
+    if (!kIsWeb) {
+      _deepLinkService.cancelAuthFlow();
+    }
+    await _tokenService.clearPendingAuth();
     await _tokenService.clearTokens();
     _setState(const AuthStateUnauthenticated());
   }
@@ -397,7 +494,6 @@ class AuthenticationService extends ChangeNotifier {
       final refreshed = await _attemptTokenRefresh();
       if (!refreshed) return null;
 
-      // Get the updated state
       final updatedState = _state;
       return updatedState is AuthStateAuthenticated ? updatedState.accessToken : null;
     }
@@ -421,27 +517,6 @@ class AuthenticationService extends ChangeNotifier {
       }
     } catch (e) {}
 
-    return null;
-  }
-
-  /// Store PKCE verifier temporarily
-  Future<void> _storePKCEVerifier(String verifier) async {
-    // This could be improved by using a more secure storage mechanism
-    await _tokenService.storeTokens(
-      accessToken: 'temp_verifier_$verifier',
-      userProfile: const UserProfile(userId: 'temp'),
-      expiresAt: DateTime.now().add(const Duration(minutes: 10)),
-    );
-  }
-
-  /// Retrieve PKCE verifier
-  Future<String?> _retrievePKCEVerifier() async {
-    final stored = await _tokenService.loadStoredTokens();
-    final token = stored?.accessToken;
-    if (token?.startsWith('temp_verifier_') == true) {
-      await _tokenService.clearTokens(); // Clean up
-      return token!.substring('temp_verifier_'.length);
-    }
     return null;
   }
 

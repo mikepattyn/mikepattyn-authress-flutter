@@ -12,6 +12,7 @@ class TokenService {
   static const String _refreshTokenKey = 'authress_refresh_token';
   static const String _userProfileKey = 'authress_user_profile';
   static const String _tokenExpiryKey = 'authress_token_expiry';
+  static const String _pendingAuthKey = 'authress_pending_auth';
 
   Timer? _tokenRefreshTimer;
 
@@ -68,6 +69,43 @@ class TokenService {
       prefs.remove(_userProfileKey),
       prefs.remove(_tokenExpiryKey),
     ]);
+  }
+
+  /// Store pending OIDC auth state before redirecting to Authress login.
+  Future<void> storePendingAuth({
+    required String nonce,
+    required String codeVerifier,
+    required String redirectUrl,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _pendingAuthKey,
+      json.encode({
+        'nonce': nonce,
+        'codeVerifier': codeVerifier,
+        'redirectUrl': redirectUrl,
+      }),
+    );
+  }
+
+  /// Load pending OIDC auth state saved before redirect.
+  Future<Map<String, dynamic>?> loadPendingAuth() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_pendingAuthKey);
+      if (raw == null) {
+        return null;
+      }
+      return json.decode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Clear pending OIDC auth state.
+  Future<void> clearPendingAuth() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingAuthKey);
   }
 
   /// Check if tokens exist and are valid

@@ -88,6 +88,13 @@ class AppRouter {
         builder: (context, state) => const ErrorPage(),
       ),
 
+      // OAuth callback (web): AuthressProvider completes login on initialize
+      GoRoute(
+        path: '/auth/callback',
+        name: 'auth-callback',
+        builder: (context, state) => const LoadingPage(),
+      ),
+
       // Loading page (useful for deep link handling)
       GoRoute(
         path: '/loading',

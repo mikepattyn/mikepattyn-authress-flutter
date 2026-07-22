@@ -435,6 +435,40 @@ void main() {
       });
     });
 
+    group('Pending OIDC auth', () {
+      test('stores and loads pending auth state', () async {
+        SharedPreferences.setMockInitialValues({});
+
+        await tokenService.storePendingAuth(
+          nonce: 'nonce-123',
+          codeVerifier: 'verifier-abc',
+          redirectUrl: 'https://app.example.com/auth/callback',
+        );
+
+        final pending = await tokenService.loadPendingAuth();
+        expect(pending?['nonce'], equals('nonce-123'));
+        expect(pending?['codeVerifier'], equals('verifier-abc'));
+        expect(
+          pending?['redirectUrl'],
+          equals('https://app.example.com/auth/callback'),
+        );
+      });
+
+      test('clears pending auth state', () async {
+        SharedPreferences.setMockInitialValues({});
+
+        await tokenService.storePendingAuth(
+          nonce: 'nonce-123',
+          codeVerifier: 'verifier-abc',
+          redirectUrl: 'https://app.example.com/auth/callback',
+        );
+
+        await tokenService.clearPendingAuth();
+
+        expect(await tokenService.loadPendingAuth(), isNull);
+      });
+    });
+
     group('Service Lifecycle', () {
       test('disposes and cancels timers', () {
         var refreshCalled = false;

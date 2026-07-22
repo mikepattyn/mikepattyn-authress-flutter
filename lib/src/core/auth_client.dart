@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
-import 'dart:io' show Platform;
 import 'dart:math';
 
 // WebView handled via url_launcher for now
@@ -319,7 +318,7 @@ class AuthressLoginClient extends ChangeNotifier {
     try {
       if (await canLaunchUrl(Uri.parse(authUrl))) {
         // Use different approaches based on platform
-        if (Platform.isIOS) {
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
           developer.log(
             '🚀 Launching in-app WebView for iOS (prevents "Return to Safari" issue)...',
           );
