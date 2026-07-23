@@ -32,7 +32,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mikepattyn_authress_login: ^0.1.0
+  mikepattyn_authress_login: ^0.1.2
 ```
 
 Then run:

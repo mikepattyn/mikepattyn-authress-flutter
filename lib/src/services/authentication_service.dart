@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/auth_config.dart';
 import '../models/auth_state.dart';
 import '../models/user_profile.dart';
+import '../platform/cookie_reader.dart';
 import '../platform/url_cleaner.dart';
 import 'crypto_service.dart';
 import 'deep_link_service.dart';
@@ -27,6 +28,9 @@ typedef LaunchUrlFn =
 
 /// Returns the current page URI (injectable for tests).
 typedef CurrentUriFn = Uri Function();
+
+/// Returns Authress browser cookies (injectable for tests).
+typedef CookieReaderFn = Map<String, String> Function();
 
 /// Result of starting an Authress authentication request.
 class AuthenticationStartResult {
@@ -53,6 +57,7 @@ class AuthenticationService extends ChangeNotifier {
   final CanLaunchUrlFn _canLaunchUrl;
   final LaunchUrlFn _launchUrl;
   final CurrentUriFn _currentUri;
+  final CookieReaderFn _readCookies;
   final bool _enableUriCallbackOnInit;
 
   AuthState _state = const AuthStateUnauthenticated();
@@ -66,6 +71,7 @@ class AuthenticationService extends ChangeNotifier {
     CanLaunchUrlFn? canLaunchUrlFn,
     LaunchUrlFn? launchUrlFn,
     CurrentUriFn? currentUriFn,
+    CookieReaderFn? cookieReaderFn,
     bool enableUriCallbackOnInit = false,
   }) : _config = config,
        _tokenService = tokenService,
@@ -75,6 +81,7 @@ class AuthenticationService extends ChangeNotifier {
        _canLaunchUrl = canLaunchUrlFn ?? canLaunchUrl,
        _launchUrl = launchUrlFn ?? launchUrl,
        _currentUri = currentUriFn ?? (() => Uri.base),
+       _readCookies = cookieReaderFn ?? readAuthressCookies,
        _enableUriCallbackOnInit = enableUriCallbackOnInit;
 
   /// Factory constructor with dependency injection
@@ -109,6 +116,7 @@ class AuthenticationService extends ChangeNotifier {
     CanLaunchUrlFn? canLaunchUrlFn,
     LaunchUrlFn? launchUrlFn,
     CurrentUriFn? currentUriFn,
+    CookieReaderFn? cookieReaderFn,
     bool enableUriCallbackOnInit = false,
   }) {
     return AuthenticationService._(
@@ -120,6 +128,7 @@ class AuthenticationService extends ChangeNotifier {
       canLaunchUrlFn: canLaunchUrlFn,
       launchUrlFn: launchUrlFn,
       currentUriFn: currentUriFn,
+      cookieReaderFn: cookieReaderFn,
       enableUriCallbackOnInit: enableUriCallbackOnInit,
     );
   }
@@ -255,8 +264,11 @@ class AuthenticationService extends ChangeNotifier {
 
   /// Complete OIDC login when the app reloads with callback params in the URL (web).
   ///
-  /// Supports both authorization-code (`code` + `nonce`) and token redirect
-  /// (`access_token` + `id_token`) responses from Authress Hosted Login.
+  /// Supports:
+  /// - authorization-code (`code` + `nonce`)
+  /// - token redirect (`access_token` + `id_token`) — typical on localhost
+  /// - cookie session (`nonce` + `iss`, credentials in Authress cookies) —
+  ///   typical on custom domains sharing a parent cookie domain
   Future<void> _completeLoginFromCallbackIfPresent() async {
     final params = _currentUri().queryParameters;
     if (!_hasAuthenticationCallback(params)) {
@@ -282,7 +294,12 @@ class AuthenticationService extends ChangeNotifier {
     final hasCodeFlow = params['code'] != null && params['nonce'] != null;
     final hasTokenFlow =
         params['access_token'] != null && params['id_token'] != null;
-    return hasCodeFlow || hasTokenFlow;
+    // Custom-domain cookie flow: Authress redirects with nonce (+ iss) and
+    // stores tokens in browser cookies instead of the query string.
+    final hasCookieFlow =
+        params['nonce'] != null &&
+        (params['iss'] != null || params['code'] == 'cookie');
+    return hasCodeFlow || hasTokenFlow || hasCookieFlow;
   }
 
   /// Process authentication callback
@@ -301,7 +318,15 @@ class AuthenticationService extends ChangeNotifier {
 
     // Prefer authorization-code exchange when both shapes are present.
     if (code != null && nonce != null) {
-      await _exchangeCodeForTokens(code, nonce);
+      final resolvedCode = code == 'cookie'
+          ? (_readCookies()['auth-code'] ?? code)
+          : code;
+      if (code == 'cookie' && resolvedCode == 'cookie') {
+        throw Exception(
+          'Authress auth-code cookie missing for cookie code flow',
+        );
+      }
+      await _exchangeCodeForTokens(resolvedCode, nonce);
       return;
     }
 
@@ -310,7 +335,13 @@ class AuthenticationService extends ChangeNotifier {
       return;
     }
 
-    throw Exception('Missing authorization code or nonce in callback');
+    // Cookie/custom-domain continuation — Authress includes `iss` with nonce.
+    if (nonce != null && params['iss'] != null) {
+      await _completeLoginFromCookieSession(nonce);
+      return;
+    }
+
+    throw Exception('Missing authorization code or tokens in callback');
   }
 
   /// Hydrate auth state when Authress redirects with tokens instead of a code.
@@ -334,6 +365,57 @@ class AuthenticationService extends ChangeNotifier {
       'refresh_token': params['refresh_token'],
       'expires_in': expiresIn,
     });
+  }
+
+  /// Complete login when Authress stored credentials in cookies (custom domain).
+  ///
+  /// Mirrors `@authress/login` userSessionContinuation: prefer readable
+  /// `authorization` + `user` cookies, otherwise PATCH `/session` with
+  /// credentials included.
+  Future<void> _completeLoginFromCookieSession(String nonce) async {
+    final pending = await _tokenService.loadPendingAuth();
+    final storedNonce = pending?['nonce'] as String?;
+    if (storedNonce != null && storedNonce != nonce) {
+      throw Exception('Authentication nonce mismatch');
+    }
+
+    final cookies = _readCookies();
+    final accessToken = cookies['authorization'];
+    final idToken = cookies['user'];
+
+    if (accessToken != null &&
+        accessToken.isNotEmpty &&
+        idToken != null &&
+        idToken.isNotEmpty) {
+      await _processTokenResponse({
+        'access_token': accessToken,
+        'id_token': idToken,
+        'expires_in': _expiresInFromJwt(accessToken) ??
+            _expiresInFromJwt(idToken) ??
+            3600,
+      });
+      return;
+    }
+
+    final response = await _httpService.patch('/api/session', body: {});
+    if (!response.isSuccess) {
+      throw Exception(
+        'Cookie session continuation failed: ${response.statusCode} ${response.body}',
+      );
+    }
+
+    await _processTokenResponse(response.jsonBody);
+  }
+
+  int? _expiresInFromJwt(String token) {
+    final payload = _tokenService.parseJwtPayload(token);
+    final exp = payload?['exp'];
+    if (exp is! int) {
+      return null;
+    }
+    final seconds =
+        exp - (DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    return seconds > 0 ? seconds : null;
   }
 
   /// Resolve redirect URL for the current platform.
@@ -371,6 +453,9 @@ class AuthenticationService extends ChangeNotifier {
       'codeChallengeMethod': pkceCodes.codeChallengeMethod,
       'codeChallenge': pkceCodes.codeChallenge,
       'applicationId': _config.applicationId,
+      // Prefer cookies on real hosts (Authress default); localhost still gets
+      // query tokens from Authress regardless of this hint.
+      if (kIsWeb) 'responseLocation': 'cookie',
       if (connectionId != null) 'connectionId': connectionId,
       if (tenantLookupIdentifier != null) 'tenantLookupIdentifier': tenantLookupIdentifier,
       if (additionalParams != null) ...additionalParams,

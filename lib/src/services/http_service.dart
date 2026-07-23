@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/auth_config.dart';
+import '../platform/http_client.dart';
 
 /// HTTP service with proper error handling, timeouts, and retry logic
 class HttpService {
@@ -15,8 +16,8 @@ class HttpService {
   static const Duration _authTimeout = Duration(minutes: 1);
   static const int _maxRetries = 3;
 
-  HttpService(this._config) {
-    _client = http.Client();
+  HttpService(this._config, {http.Client? client}) {
+    _client = client ?? createAuthressHttpClient();
   }
 
   /// Build URL with proper path handling
@@ -65,6 +66,25 @@ class HttpService {
     );
   }
 
+  /// PATCH request (Authress session continuation).
+  Future<HttpResponse> patch(
+    String path, {
+    Map<String, String>? headers,
+    Object? body,
+    Duration? timeout,
+    int? maxRetries,
+  }) async {
+    return _executeWithRetry(
+      () => _client.patch(
+        Uri.parse(buildUrl(path)),
+        headers: _buildHeaders(headers),
+        body: body is String ? body : json.encode(body ?? {}),
+      ),
+      timeout: timeout ?? _authTimeout,
+      maxRetries: maxRetries ?? _maxRetries,
+    );
+  }
+
   /// Execute request with retry logic
   Future<HttpResponse> _executeWithRetry(
     Future<http.Response> Function() requestFn, {
@@ -102,15 +122,16 @@ class HttpService {
       }
     }
 
-    throw lastException ?? HttpException('Request failed after $maxRetries retries');
+    throw lastException ??
+        HttpException('Request failed after $maxRetries retries');
   }
 
   /// Build request headers with defaults
   Map<String, String> _buildHeaders(Map<String, String>? customHeaders) {
     final headers = <String, String>{
       'Content-Type': 'application/json',
-      'X-Powered-By': 'Authress Login SDK; Flutter; 2.0.0',
-      'User-Agent': 'AuthressLoginFlutter/2.0.0',
+      'X-Powered-By': 'Authress Login SDK; Flutter; 0.1.2',
+      'User-Agent': 'AuthressLoginFlutter/0.1.2',
     };
 
     if (customHeaders != null) {
@@ -160,5 +181,6 @@ class HttpException implements Exception {
   const HttpException(this.message, [this.statusCode]);
 
   @override
-  String toString() => 'HttpException: $message${statusCode != null ? ' (Status: $statusCode)' : ''}';
+  String toString() =>
+      'HttpException: $message${statusCode != null ? ' (Status: $statusCode)' : ''}';
 }

@@ -350,7 +350,7 @@ void main() {
         expect(authService.state, isA<AuthStateError>());
         expect(
           (authService.state as AuthStateError).message,
-          contains('Missing authorization code'),
+          contains('Missing authorization code or tokens'),
         );
       });
 
@@ -950,6 +950,171 @@ void main() {
               expiresAt: any(named: 'expiresAt'),
             ),
           );
+        },
+      );
+
+      test(
+        'completes login from authorization+user cookies on nonce+iss callback',
+        () async {
+          authService = AuthenticationService.forTesting(
+            config: TestData.validConfig,
+            tokenService: mockTokenService,
+            httpService: mockHttpService,
+            deepLinkService: mockDeepLinkService,
+            cryptoService: mockCryptoService,
+            enableUriCallbackOnInit: true,
+            currentUriFn: () => Uri.parse(
+              'https://gofish.example.com/auth/callback'
+              '?nonce=mock-nonce-456'
+              '&iss=https://authress.example.com',
+            ),
+            cookieReaderFn: () => {
+              'authorization': TestData.validAccessToken,
+              'user': TestData.mockIdToken,
+            },
+          );
+
+          when(
+            () => mockTokenService.loadStoredTokens(),
+          ).thenAnswer((_) async => null);
+
+          when(() => mockTokenService.loadPendingAuth()).thenAnswer(
+            (_) async => {
+              'nonce': 'mock-nonce-456',
+              'codeVerifier': TestData.mockPKCECodes.codeVerifier,
+              'redirectUrl': 'https://gofish.example.com/auth/callback',
+            },
+          );
+
+          await authService.initialize();
+
+          expect(authService.state, isA<AuthStateAuthenticated>());
+          expect(authService.accessToken, equals(TestData.validAccessToken));
+          expect(authService.userProfile?.userId, equals(TestData.validUserId));
+          verifyNever(
+            () => mockHttpService.patch(any(), body: any(named: 'body')),
+          );
+          verifyNever(
+            () => mockHttpService.post(any(), body: any(named: 'body')),
+          );
+          verify(() => mockTokenService.clearPendingAuth()).called(1);
+          verify(
+            () => mockTokenService.storeTokens(
+              accessToken: TestData.validAccessToken,
+              refreshToken: null,
+              userProfile: any(named: 'userProfile'),
+              expiresAt: any(named: 'expiresAt'),
+            ),
+          ).called(1);
+        },
+      );
+
+      test(
+        'falls back to PATCH /session when cookie tokens are missing',
+        () async {
+          authService = AuthenticationService.forTesting(
+            config: TestData.validConfig,
+            tokenService: mockTokenService,
+            httpService: mockHttpService,
+            deepLinkService: mockDeepLinkService,
+            cryptoService: mockCryptoService,
+            enableUriCallbackOnInit: true,
+            currentUriFn: () => Uri.parse(
+              'https://gofish.example.com/auth/callback'
+              '?nonce=mock-nonce-456'
+              '&iss=https://authress.example.com',
+            ),
+            cookieReaderFn: () => const {},
+          );
+
+          when(
+            () => mockTokenService.loadStoredTokens(),
+          ).thenAnswer((_) async => null);
+
+          when(() => mockTokenService.loadPendingAuth()).thenAnswer(
+            (_) async => {
+              'nonce': 'mock-nonce-456',
+              'codeVerifier': TestData.mockPKCECodes.codeVerifier,
+              'redirectUrl': 'https://gofish.example.com/auth/callback',
+            },
+          );
+
+          when(
+            () => mockHttpService.patch('/api/session', body: any(named: 'body')),
+          ).thenAnswer(
+            (_) async => HttpResponse(
+              statusCode: 200,
+              body: json.encode(TestData.tokenResponse),
+              headers: const {},
+              isSuccess: true,
+            ),
+          );
+
+          await authService.initialize();
+
+          expect(authService.state, isA<AuthStateAuthenticated>());
+          expect(authService.accessToken, equals(TestData.validAccessToken));
+          verify(
+            () => mockHttpService.patch('/api/session', body: any(named: 'body')),
+          ).called(1);
+          verify(() => mockTokenService.clearPendingAuth()).called(1);
+        },
+      );
+
+      test(
+        'exchanges auth-code cookie when code=cookie in callback',
+        () async {
+          authService = AuthenticationService.forTesting(
+            config: TestData.validConfig,
+            tokenService: mockTokenService,
+            httpService: mockHttpService,
+            deepLinkService: mockDeepLinkService,
+            cryptoService: mockCryptoService,
+            enableUriCallbackOnInit: true,
+            currentUriFn: () => Uri.parse(
+              'https://gofish.example.com/auth/callback'
+              '?code=cookie&nonce=mock-nonce-456',
+            ),
+            cookieReaderFn: () => {'auth-code': 'mock-auth-code-123'},
+          );
+
+          when(
+            () => mockTokenService.loadStoredTokens(),
+          ).thenAnswer((_) async => null);
+
+          when(() => mockTokenService.loadPendingAuth()).thenAnswer(
+            (_) async => {
+              'nonce': 'mock-nonce-456',
+              'codeVerifier': TestData.mockPKCECodes.codeVerifier,
+              'redirectUrl': 'https://gofish.example.com/auth/callback',
+            },
+          );
+
+          when(
+            () => mockHttpService.post(
+              '/api/authentication/mock-nonce-456/tokens',
+              body: any(named: 'body'),
+            ),
+          ).thenAnswer(
+            (_) async => HttpResponse(
+              statusCode: 200,
+              body: json.encode(TestData.tokenResponse),
+              headers: const {},
+              isSuccess: true,
+            ),
+          );
+
+          await authService.initialize();
+
+          expect(authService.state, isA<AuthStateAuthenticated>());
+          final captured = verify(
+            () => mockHttpService.post(
+              '/api/authentication/mock-nonce-456/tokens',
+              body: captureAny(named: 'body'),
+            ),
+          ).captured.single as Map;
+          expect(captured['code'], equals('mock-auth-code-123'));
+          verify(() => mockTokenService.clearPendingAuth()).called(1);
         },
       );
     });
