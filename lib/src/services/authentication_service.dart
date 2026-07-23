@@ -253,12 +253,13 @@ class AuthenticationService extends ChangeNotifier {
     }
   }
 
-  /// Complete OIDC login when the app reloads with code + nonce in the URL (web).
+  /// Complete OIDC login when the app reloads with callback params in the URL (web).
+  ///
+  /// Supports both authorization-code (`code` + `nonce`) and token redirect
+  /// (`access_token` + `id_token`) responses from Authress Hosted Login.
   Future<void> _completeLoginFromCallbackIfPresent() async {
     final params = _currentUri().queryParameters;
-    final code = params['code'];
-    final nonce = params['nonce'];
-    if (code == null || nonce == null) {
+    if (!_hasAuthenticationCallback(params)) {
       return;
     }
 
@@ -277,6 +278,13 @@ class AuthenticationService extends ChangeNotifier {
     }
   }
 
+  bool _hasAuthenticationCallback(Map<String, String> params) {
+    final hasCodeFlow = params['code'] != null && params['nonce'] != null;
+    final hasTokenFlow =
+        params['access_token'] != null && params['id_token'] != null;
+    return hasCodeFlow || hasTokenFlow;
+  }
+
   /// Process authentication callback
   Future<void> _processAuthenticationCallback(
     Map<String, String> params,
@@ -284,16 +292,48 @@ class AuthenticationService extends ChangeNotifier {
     final error = params['error'];
     final code = params['code'];
     final nonce = params['nonce'];
+    final accessToken = params['access_token'];
+    final idToken = params['id_token'];
 
     if (error != null) {
       throw Exception('Authentication error: $error');
     }
 
-    if (code == null || nonce == null) {
-      throw Exception('Missing authorization code or nonce in callback');
+    // Prefer authorization-code exchange when both shapes are present.
+    if (code != null && nonce != null) {
+      await _exchangeCodeForTokens(code, nonce);
+      return;
     }
 
-    await _exchangeCodeForTokens(code, nonce);
+    if (accessToken != null && idToken != null) {
+      await _completeLoginFromRedirectTokens(params);
+      return;
+    }
+
+    throw Exception('Missing authorization code or nonce in callback');
+  }
+
+  /// Hydrate auth state when Authress redirects with tokens instead of a code.
+  Future<void> _completeLoginFromRedirectTokens(
+    Map<String, String> params,
+  ) async {
+    final nonce = params['nonce'];
+    if (nonce != null) {
+      final pending = await _tokenService.loadPendingAuth();
+      final storedNonce = pending?['nonce'] as String?;
+      if (storedNonce != null && storedNonce != nonce) {
+        throw Exception('Authentication nonce mismatch');
+      }
+    }
+
+    final expiresIn = int.tryParse(params['expires_in'] ?? '') ?? 3600;
+
+    await _processTokenResponse({
+      'access_token': params['access_token']!,
+      'id_token': params['id_token']!,
+      'refresh_token': params['refresh_token'],
+      'expires_in': expiresIn,
+    });
   }
 
   /// Resolve redirect URL for the current platform.

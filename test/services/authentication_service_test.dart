@@ -854,6 +854,104 @@ void main() {
         expect(authService.state, isA<AuthStateError>());
         verify(() => mockTokenService.clearPendingAuth()).called(1);
       });
+
+      test(
+        'completes login from access_token and id_token in URL on initialize',
+        () async {
+          authService = AuthenticationService.forTesting(
+            config: TestData.validConfig,
+            tokenService: mockTokenService,
+            httpService: mockHttpService,
+            deepLinkService: mockDeepLinkService,
+            cryptoService: mockCryptoService,
+            enableUriCallbackOnInit: true,
+            currentUriFn: () => Uri.parse(
+              'https://app.example.com/auth/callback'
+              '?nonce=mock-nonce-456'
+              '&access_token=${TestData.validAccessToken}'
+              '&id_token=${TestData.mockIdToken}'
+              '&expires_in=604799'
+              '&session_token=mock-session-token',
+            ),
+          );
+
+          when(
+            () => mockTokenService.loadStoredTokens(),
+          ).thenAnswer((_) async => null);
+
+          when(() => mockTokenService.loadPendingAuth()).thenAnswer(
+            (_) async => {
+              'nonce': 'mock-nonce-456',
+              'codeVerifier': TestData.mockPKCECodes.codeVerifier,
+              'redirectUrl': 'https://app.example.com/auth/callback',
+            },
+          );
+
+          await authService.initialize();
+
+          expect(authService.state, isA<AuthStateAuthenticated>());
+          expect(authService.accessToken, equals(TestData.validAccessToken));
+          expect(authService.userProfile?.userId, equals(TestData.validUserId));
+          verifyNever(
+            () => mockHttpService.post(any(), body: any(named: 'body')),
+          );
+          verify(() => mockTokenService.clearPendingAuth()).called(1);
+          verify(
+            () => mockTokenService.storeTokens(
+              accessToken: TestData.validAccessToken,
+              refreshToken: null,
+              userProfile: any(named: 'userProfile'),
+              expiresAt: any(named: 'expiresAt'),
+            ),
+          ).called(1);
+        },
+      );
+
+      test(
+        'rejects token callback when pending nonce mismatches',
+        () async {
+          authService = AuthenticationService.forTesting(
+            config: TestData.validConfig,
+            tokenService: mockTokenService,
+            httpService: mockHttpService,
+            deepLinkService: mockDeepLinkService,
+            cryptoService: mockCryptoService,
+            enableUriCallbackOnInit: true,
+            currentUriFn: () => Uri.parse(
+              'https://app.example.com/auth/callback'
+              '?nonce=wrong-nonce'
+              '&access_token=${TestData.validAccessToken}'
+              '&id_token=${TestData.mockIdToken}'
+              '&expires_in=3600',
+            ),
+          );
+
+          when(
+            () => mockTokenService.loadStoredTokens(),
+          ).thenAnswer((_) async => null);
+
+          when(() => mockTokenService.loadPendingAuth()).thenAnswer(
+            (_) async => {
+              'nonce': 'mock-nonce-456',
+              'codeVerifier': TestData.mockPKCECodes.codeVerifier,
+              'redirectUrl': 'https://app.example.com/auth/callback',
+            },
+          );
+
+          await authService.initialize();
+
+          expect(authService.state, isA<AuthStateError>());
+          verify(() => mockTokenService.clearPendingAuth()).called(1);
+          verifyNever(
+            () => mockTokenService.storeTokens(
+              accessToken: any(named: 'accessToken'),
+              refreshToken: any(named: 'refreshToken'),
+              userProfile: any(named: 'userProfile'),
+              expiresAt: any(named: 'expiresAt'),
+            ),
+          );
+        },
+      );
     });
   });
 }

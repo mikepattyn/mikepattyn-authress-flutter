@@ -378,32 +378,51 @@ class AuthressLoginClient extends ChangeNotifier {
     final code = params['code'];
     final error = params['error'];
     final nonce = params['nonce'];
+    final accessToken = params['access_token'];
+    final idToken = params['id_token'];
 
     if (error != null) {
       developer.log('❌ Authentication error: $error');
       throw Exception('Authentication error: $error');
     }
 
-    if (code == null) {
-      developer.log('❌ No authorization code in params');
-      developer.log('📋 Available keys: ${params.keys.toList()}');
-      throw Exception('No authorization code received');
+    if (code != null && nonce != null) {
+      developer.log('✅ Authorization code received, length: ${code.length}');
+      developer.log('✅ Nonce received, length: ${nonce.length}');
+      developer.log('🔄 Starting token exchange...');
+      await _exchangeCodeForTokensWithNonce(code, nonce);
+      developer.log('🎉 Authentication flow completed successfully!');
+      return;
     }
 
-    if (nonce == null) {
-      developer.log('❌ No nonce in params');
-      developer.log('📋 Available keys: ${params.keys.toList()}');
-      throw Exception('No nonce received');
+    if (accessToken != null && idToken != null) {
+      developer.log('✅ Access/id tokens received in callback; hydrating session');
+      final expiresIn = int.tryParse(params['expires_in'] ?? '') ?? 3600;
+      final payload = _parseJwtPayload(idToken);
+      final userProfile = UserProfile.fromJson(payload);
+      final expiresAt = DateTime.now().add(Duration(seconds: expiresIn));
+      await _storeTokens(
+        accessToken,
+        params['refresh_token'],
+        userProfile,
+        expiresAt,
+      );
+      _setState(
+        AuthStateAuthenticated(
+          user: userProfile,
+          accessToken: accessToken,
+          refreshToken: params['refresh_token'],
+          expiresAt: expiresAt,
+        ),
+      );
+      _scheduleTokenRefresh(expiresAt);
+      developer.log('🎉 Authentication flow completed successfully!');
+      return;
     }
 
-    developer.log('✅ Authorization code received, length: ${code.length}');
-    developer.log('✅ Nonce received, length: ${nonce.length}');
-    developer.log('🔄 Starting token exchange...');
-
-    // Exchange code for tokens (JavaScript style)
-    await _exchangeCodeForTokensWithNonce(code, nonce);
-
-    developer.log('🎉 Authentication flow completed successfully!');
+    developer.log('❌ Missing authorization code/nonce or tokens in callback');
+    developer.log('📋 Available keys: ${params.keys.toList()}');
+    throw Exception('No authorization code or tokens received');
   }
 
   /// Exchange authorization code for access tokens (JavaScript-style with nonce)

@@ -1,6 +1,6 @@
 name: mikepattyn_authress_login
 description: Flutter Authress authentication with provider-based guards and GoRouter integration.
-version: 0.1.0
+version: 0.1.1
 homepage: https://github.com/mikepattyn/authress-flutter
 repository: https://github.com/mikepattyn/authress-flutter
 issue_tracker: https://github.com/mikepattyn/authress-flutter/issues
