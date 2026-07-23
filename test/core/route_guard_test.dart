@@ -96,6 +96,41 @@ void main() {
       );
 
       testWidgets(
+        'redirects to home when authenticated user lands on auth callback',
+        (tester) async {
+          when(() => mockRouterState.matchedLocation)
+              .thenReturn('/auth/callback');
+
+          final user = const UserProfile(userId: 'user-123');
+          final authContext = AuthressContext(
+            authState: AuthStateAuthenticated(
+              user: user,
+              accessToken: 'token',
+              expiresAt: DateTime.now().add(const Duration(hours: 1)),
+            ),
+            user: user,
+            accessToken: 'token',
+          );
+
+          await tester.pumpWidget(
+            TestAuthressProvider(
+              authContext: authContext,
+              child: Builder(
+                builder: (context) {
+                  final result = AuthressRouteGuard.redirectLogic(
+                    context,
+                    mockRouterState,
+                  );
+                  expect(result, equals('/home'));
+                  return const SizedBox();
+                },
+              ),
+            ),
+          );
+        },
+      );
+
+      testWidgets(
         'redirects to login when unauthenticated user tries to access protected route',
         (tester) async {
           when(() => mockRouterState.matchedLocation).thenReturn('/dashboard');

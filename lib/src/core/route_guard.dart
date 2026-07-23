@@ -17,8 +17,8 @@ class AuthressRouteGuard {
       return null;
     }
 
-    // If authenticated and trying to access login, redirect to home
-    if (authContext.isAuthenticated && isLoginRoute) {
+    // If authenticated and trying to access login or OAuth callback, leave those routes
+    if (authContext.isAuthenticated && (isLoginRoute || isAuthRoute)) {
       return '/home';
     }
 

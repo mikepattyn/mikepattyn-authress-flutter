@@ -6,6 +6,8 @@ void clearAuthressCallbackQuery() {
   if (uri.queryParameters.isEmpty) {
     return;
   }
-  final cleaned = uri.replace(queryParameters: {});
-  web.window.history.replaceState(null, '', cleaned.toString());
+  // Path-only replace strips tokens from the query without writing an absolute
+  // URL that can interact badly with hash-based routing.
+  final cleanedPath = uri.path.isEmpty ? '/' : uri.path;
+  web.window.history.replaceState(null, '', cleanedPath);
 }
